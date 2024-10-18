@@ -1,0 +1,3 @@
+#! /bin/bash
+elk_system_utils --remount-as-ro
+

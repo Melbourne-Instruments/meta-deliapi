@@ -1,0 +1,59 @@
+software =
+{
+    target = "@@DISTRO@@";
+    version = "@@DISTRO_VERSION@@";
+
+    stable:
+    {
+        mmcblk0p2:
+        {
+            images: (
+                {
+                    filename = "delia-firmware-@@DISTRO_VERSION@@.ext4.gz";
+                    type = "raw";
+                    device = "/dev/mmcblk0p2";
+                    compressed = true;
+                    installed-directly = true;
+                    sha256 = "@delia-firmware-@@DISTRO_VERSION@@.ext4.gz";
+                }
+            );
+
+            bootenv: (
+                {
+                    name = "default_part";
+                    value = "0";
+                },
+                {
+                    name = "fallback_part";
+                    value = "1";
+                }
+            );
+        }
+
+        mmcblk0p3:
+        {
+            images: (
+                {
+                    filename = "delia-firmware-@@DISTRO_VERSION@@.ext4.gz";
+                    type = "raw";
+                    device = "/dev/mmcblk0p3";
+                    compressed = true;
+                    installed-directly = true;
+                    sha256 = "@delia-firmware-@@DISTRO_VERSION@@.ext4.gz";
+                }
+            );
+
+            bootenv: (
+                {
+                    name = "default_part";
+                    value = "1";
+                },
+                {
+                    name = "fallback_part";
+                    value = "0";
+                }
+            );
+        }
+    };
+}
+

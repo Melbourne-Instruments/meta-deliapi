@@ -1,0 +1,8 @@
+# short-description: Create DELIA Pi SD card image
+# long-description: Creates a partitioned SD card image for use with
+# DELIA Pi. Boot files are located in the first vfat partition.
+
+part --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size 40
+part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootfs1 --align 1024 --fixed-size 1536M --use-uuid
+part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootfs2 --align 1024 --fixed-size 1536M --use-uuid
+part --ondisk mmcblk0 --fstype=ext4 --label userdata --align 1024 --fixed-size 3072M

@@ -1,0 +1,16 @@
+
+########################################################################
+
+Melbourne Instruments DELIA OS Image for DELIA Pi board on RaspberryPi 4
+
+########################################################################
+
+DELIA Pi board specific targets:
+    deliapi-audio-os-image - builds a DELIA OS Pi development image
+
+To build an image, run:
+    bitbake deliapi-audio-os-image
+    bitbake deliapi-audio-os-swu
+
+To build the cross-compiling Yocto SDK, run:
+    bitbake -c populate_sdk deliapi-audio-os-image

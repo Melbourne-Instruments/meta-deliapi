@@ -1,0 +1,240 @@
+#!/bin/sh
+
+if [ "$EUID" -ne 0 ]
+  then echo "Please run as root or with sudo permissions"
+  exit
+fi
+
+case "$1" in
+
+--set-audio-hat)
+    HAT_NAME=$2
+    if [ "$HAT_NAME" = "elk-pi" ]; then
+        sed -i '/AUDIO_HAT=/c\AUDIO_HAT=\"elk-pi\"' /udata/.elk-system/elk-system.conf
+    elif [ "$HAT_NAME" = "hifiberry-dac-plus-adc" ]; then
+        sed -i '/AUDIO_HAT=/c\AUDIO_HAT=\"hifi-berry\"' /udata/.elk-system/elk-system.conf
+    elif [ "$HAT_NAME" = "hifiberry-dac-plus-adc-pro" ]; then
+        sed -i '/AUDIO_HAT=/c\AUDIO_HAT=\"hifi-berry-pro\"' /udata/.elk-system/elk-system.conf
+    else
+        echo "Invalid audio hat $HAT_NAME specified. Options are :"
+        echo "    - elk-pi (default)"
+        echo "    - hifiberry-dac-plus-adc"
+        echo "    - hifiberry-dac-plus-adc-pro"
+        exit 1
+    fi
+    echo "Using audio hat $HAT_NAME. Please power cycle for changes to take effect.."
+    echo "Note! This is persistent across boot cycles but not after software update."
+    ;;
+
+--set-buffer-size)
+    NEW_BUFFER_SIZE=$2
+    SUPPORTED_BUFFER_SIZES="32, 64, 128"
+
+    case $NEW_BUFFER_SIZE in
+    "32" | "64" | "128")
+        ;;
+    *)
+        echo "Invalid buffer size of $NEW_BUFFER_SIZE. Supported buffer sizes are $SUPPORTED_BUFFER_SIZES."
+        exit
+        ;;
+    esac
+
+    HAT_NAME=`cat /sys/module/audio_rtdm/parameters/audio_hat`
+    if [ "$HAT_NAME" = "elkpi" ]; then
+        echo "Setting audio buffer size to $NEW_BUFFER_SIZE. Please power cycle the board for changes to take affect"
+        echo "Note! This is persistent accross boot cycles but not after software update."
+    else
+        echo $NEW_BUFFER_SIZE > /sys/module/audio_rtdm/parameters/audio_buffer_size
+        echo "Setting audio buffer size to $NEW_BUFFER_SIZE. Changes will take effect only from the next time SUSHI is run."
+        echo "Note! This is persistent accross boot cycles but not after software update."
+    fi
+    sed -i "/AUDIO_BUFFER_SIZE=/c\AUDIO_BUFFER_SIZE=$NEW_BUFFER_SIZE" /udata/.elk-system/elk-system.conf
+    ;;
+
+--reset-boot-count)
+    echo "setting boot count to 0 ..."
+    mount /dev/mmcblk0p1 /boot
+    sleep 1
+    fw_setenv boot_count "0" && sync
+    sleep 1
+    umount /boot
+    echo "Done!"
+    exit 0;
+    ;;
+
+--usb-speed)
+    if cat /sys/firmware/devicetree/base/model | grep -q "Raspberry Pi 4"
+    then
+        echo "Error : This option is available only for Raspberry Pi3!"
+        exit 1
+    fi
+
+    if [ "$2" -ne "1" ]; then
+        if [ "$2" -ne "2" ]; then
+            echo "Invalid usb speed $2"
+            exit 1;
+        fi
+    fi
+    echo "set usb speed to $2 ..."
+    mount /dev/mmcblk0p1 /boot
+    sleep 1
+    if [ "$2" -eq "2" ]; then
+        fw_setenv dwc_otg_speed ' '
+	sync
+        sleep 1
+        umount /boot
+    exit 0;
+    fi
+    fw_setenv dwc_otg_speed 'dwc_otg.speed=1'
+    sync
+    sleep 1
+    umount /boot
+    echo "Done! Changes will take effect in the next power cycle."
+    exit 0;
+    ;;
+
+--default-rootfs)
+    mount /dev/mmcblk0p1 /boot && sync
+    sleep 1
+
+    DEFAULT_ROOTFS_PART=$2
+    if [ "$DEFAULT_ROOTFS_PART" -eq "1" ]; then
+        fw_setenv default_part "0" && sync
+        fw_setenv fallback_part "1" && sync
+    elif [ "$DEFAULT_ROOTFS_PART" -eq "2" ]; then
+        fw_setenv default_part "1" && sync
+        fw_setenv fallback_part "0" && sync
+    else
+        echo "Invalid rootfs partition number $DEFAULT_ROOTFS_PART"
+        sync && umount /boot
+        exit 1;
+    fi
+    echo "setting default rootfs partition to $DEFAULT_ROOTFS_PART ..."
+    fw_setenv boot_count "0" && sync
+    sleep 1
+    umount /boot
+    echo "Done! Changes will take effect in the next power cycle."
+    exit 0;
+    ;;
+
+--ro-rootfs)
+    if [ "$2" = "enable" ]; then
+        echo "setting current partition to read only ..."
+        sed -i '/root/{s/\bdefaults\b/ro/}' /etc/fstab
+    elif [ "$2" = "disable" ]; then
+        echo "setting current partition to read write ..."
+        rootfs=`mount | grep "on / type" | cut -d':' -f 2 | cut -d' ' -f 1`
+        if [ $rootfs == '/dev/mmcblk0p2' ];then
+            mount -o remount,rw /dev/mmcblk0p2 /
+        else
+            mount -o remount,rw /dev/mmcblk0p3 /
+        fi
+        sleep 1
+        sed -i '/root/{s/\bro\b/defaults/}' /etc/fstab
+    else
+        echo "wrong option for ro_rootfs. Should be either [enable] or [disable]"
+        exit 1;
+    fi
+    echo "Done! Changes will take effect in the next power cycle."
+    ;;
+
+--remount-as-rw)
+    echo "Temporily remounting current rootfs as rw"
+
+    rootfs=`mount | grep "on / type" | cut -d':' -f 2 | cut -d' ' -f 1`
+    if [ $rootfs == '/dev/mmcblk0p2' ];then
+        mount -o remount,rw /dev/mmcblk0p2 /
+    else
+        mount -o remount,rw /dev/mmcblk0p3 /
+    fi
+
+    echo "Done! Note, this is not persistent across boot cycles."
+    ;;
+
+--remount-as-ro)
+    echo "Temporily remounting current rootfs as ro"
+
+    rootfs=`mount | grep "on / type" | cut -d':' -f 2 | cut -d' ' -f 1`
+    if [ $rootfs == '/dev/mmcblk0p2' ];then
+        mount -o remount,ro /dev/mmcblk0p2 /
+    else
+        mount -o remount,ro /dev/mmcblk0p3 /
+    fi
+    echo "Done! Note, this is not persistent across boot cycles"
+    ;;
+
+--set-cpu-speed)
+    echo userspace > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+    if [ "$2" = "min" ]; then
+        cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq > /sys/devices/system/cpu/cpu0/cpufreq/scaling_setspeed
+        sed -i 's/max/min/g' /udata/.elk-system/elk-system.conf
+    elif [ "$2" = "max" ]; then
+        cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq > /sys/devices/system/cpu/cpu0/cpufreq/scaling_setspeed
+        sed -i 's/min/max/g' /udata/.elk-system/elk-system.conf
+    else
+        echo "Invalid CPU Speed specified! Arguments are [min] or [max]."
+        exit 1;
+    fi
+
+    echo "Set cpu freq to :" && cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq
+    sync
+    echo "Done! Note, This is persistent across boot cycles but not after a SW Update!"
+    ;;
+
+*)
+    echo ""
+    echo "Utilities to tweak the underlying system of Elk Audio OS."
+    echo ""
+    echo "Usage: sudo elk_system_utils COMMAND [ARG]"
+    echo "  example: sudo elk_system_utils --ro-rootfs disable"
+    echo ""
+    echo ""
+    echo "COMMAND"
+    echo "  --set-audio-hat [hat]         : Change the audio hat used. Default is
+                                  elk-pi. Changes take affect only after a power
+                                  cycle and is persistent across boot cycles,
+                                  but not after a software update.
+                                  Options for [hat] are:
+                                      - elk-pi (default)
+                                      - hifiberry-dac-plus-adc
+                                      - hifiberry-dac-plus-adc-pro
+ 
+  --set-buffer-size [size]      : Set the audio buffer size. Default is 64.
+                                  It should be a power of 2. Changes take affect
+                                  only after a power cycle and is persistent
+                                  across boot cycles but not after a
+                                  software update.
+ 
+  --reset-boot-count            : Set the boot count environment variable.
+ 
+  --usb-speed [1, 2]            : Set the usb speed. Perform a power cycle for
+                                  changes to take effect. Note that this option
+                                  only applies for RaspberrPi 3 Models.
+ 
+  --default-rootfs [1, 2]       : Set the defualt rootfs partition, which will be
+                                  your primary partition. Perform a power cycle
+                                  for changes to take effect
+ 
+  --ro-rootfs [enable, disable] : Use this to enable or disable read only permissions
+                                  permanently for the current rootfs partition.
+                                  Perform a power cycle for changes to
+                                  take effect.
+ 
+  --remount-as-ro               : Use this to mount current rootfs partition as
+                                  ro. This will not persist across boot cycles.
+                                  Use --ro-rootfs enable for that instead.
+ 
+  --remount-as-rw               : Use this to mount current rootfs partition as
+                                  rw. This will not persist across boot cycles.
+                                  Use --ro-rootfs disable for that instead.
+ 
+  --set-cpu-speed [min, max]    : Use this to set the cpu speed to either minimum
+                                  or max(default). This will persist accross
+                                  boot cycles but not after a SW Update. To see
+                                  what the minimum and maximum frequencies are,
+                                  you can run command lscpu"
+    exit 0
+    ;;
+
+esac
+

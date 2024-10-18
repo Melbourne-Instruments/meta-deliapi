@@ -1,0 +1,16 @@
+[Unit]
+Description=DELIA GUI starting service
+Requires=fpga-config.service
+After=fpga-config.service
+
+[Service]
+Type=simple
+RemainAfterExit=yes
+WorkingDirectory=/udata/
+Environment=QT_QPA_PLATFORM=eglfs
+Environment=QT_QPA_EGLFS_ROTATION=-90
+Environment=XDG_RUNTIME_DIR=/tmp/runtime-root
+ExecStart=/usr/bin/delia_gui
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=DELIA UI starting service
+Requires=sushi.service
+After=sushi.service
+
+[Service]
+Type=simple
+RemainAfterExit=yes
+WorkingDirectory=/udata
+Environment=LD_LIBRARY_PATH=/usr/xenomai/lib
+User=root
+ExecStart=/usr/bin/delia_ui
+
+[Install]
+WantedBy=multi-user.target

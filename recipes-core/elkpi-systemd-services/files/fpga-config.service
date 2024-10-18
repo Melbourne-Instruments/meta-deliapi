@@ -1,0 +1,11 @@
+[Unit]
+Description=Configure the FPGAs
+After=local-fs.target sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/fpga_config
+User=root
+
+[Install]
+WantedBy=multi-user.target

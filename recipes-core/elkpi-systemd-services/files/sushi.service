@@ -1,0 +1,15 @@
+[Unit]
+Description=Sushi starting service
+After=load-drivers.service udata-perms.service fpga-config.service
+ConditionPathExists=/dev/rtdm/audio_rtdm
+
+[Service]
+Type=simple
+RemainAfterExit=yes
+WorkingDirectory=/udata/
+Environment=LD_LIBRARY_PATH=/usr/xenomai/lib
+ExecStart=/usr/bin/sushi -r -c /home/root/delia/config_delia.json
+User=root
+
+[Install]
+WantedBy=multi-user.target

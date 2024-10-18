@@ -1,0 +1,1141 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 675763c..d0ad3dc 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -51,17 +51,17 @@ configure_file(
+ 
+ # Default behaviour is to build and link with everything
+ option(WITH_XENOMAI "Enable Xenomai support" ON)
+-option(WITH_JACK "Enable Jack support" ON)
+-option(WITH_VST2 "Enable Vst 2 support" ON)
++option(WITH_JACK "Enable Jack support" OFF)
++option(WITH_VST2 "Enable Vst 2 support" OFF)
+ option(WITH_VST3 "Enable Vst 3 support" ON)
+-option(WITH_LV2 "Enable LV 2 support" ON)
+-option(WITH_LV2_MDA_TESTS "Include unit tests depending on LV2 drobilla MDA plugin port." ON)
+-option(WITH_UNIT_TESTS "Build and run unit tests after compilation" ON)
+-option(WITH_LINK "Enable Ableton Link support" ON)
++option(WITH_LV2 "Enable LV 2 support" OFF)
++option(WITH_LV2_MDA_TESTS "Include unit tests depending on LV2 drobilla MDA plugin port." OFF)
++option(WITH_UNIT_TESTS "Build and run unit tests after compilation" OFF)
++option(WITH_LINK "Enable Ableton Link support" OFF)
+ option(WITH_RPC_INTERFACE "Enable RPC control support" ON)
+-option(BUILD_TWINE "Build included Twine library" ON)
++option(BUILD_TWINE "Build included Twine library" OFF)
+ 
+-set(AUDIO_BUFFER_SIZE 64 CACHE STRING "Set internal audio buffer size in frames")
++set(AUDIO_BUFFER_SIZE 128 CACHE STRING "Set internal audio buffer size in frames")
+ 
+ if (${WITH_XENOMAI})
+     message("Building with Xenomai support")
+diff --git a/include/control_interface.h b/include/control_interface.h
+index b1459d1..890a301 100644
+--- a/include/control_interface.h
++++ b/include/control_interface.h
+@@ -98,6 +98,13 @@ struct ParameterInfo
+     float           max_domain_value;
+ };
+ 
++struct ParameterValue
++{
++    int   processor_id;
++    int   parameter_id;
++    float value;
++};
++
+ struct PropertyInfo
+ {
+     int         id;
+@@ -360,12 +367,18 @@ public:
+     virtual ~ParameterController() = default;
+ 
+     virtual std::pair<ControlStatus, std::vector<ParameterInfo>>  get_processor_parameters(int processor_id) const = 0;
++    virtual std::pair<ControlStatus, std::vector<ParameterInfo>>  get_processor_parameters(int processor_id, int layer_id) const = 0;
++    virtual std::pair<ControlStatus, std::vector<ParameterInfo>>  get_processor_parameters(int processor_id, int layer_id, int state_id) const = 0;
+     virtual std::pair<ControlStatus, std::vector<ParameterInfo>>  get_track_parameters(int processor_id) const = 0;
+     virtual std::pair<ControlStatus, int>                         get_parameter_id(int processor_id, const std::string& parameter) const = 0;
+     virtual std::pair<ControlStatus, ParameterInfo>               get_parameter_info(int processor_id, int parameter_id) const = 0;
++    virtual std::pair<ControlStatus, std::vector<ParameterValue>> get_parameter_values(int processor_id) const = 0;
++    virtual std::pair<ControlStatus, std::vector<ParameterValue>> get_parameter_values(int processor_id, int layer_id) const = 0;
++    virtual std::pair<ControlStatus, std::vector<ParameterValue>> get_parameter_values(int processor_id, int layer_id, int state_id) const = 0;
+     virtual std::pair<ControlStatus, float>                       get_parameter_value(int processor_id, int parameter_id) const = 0;
+     virtual std::pair<ControlStatus, float>                       get_parameter_value_in_domain(int processor_id, int parameter_id) const = 0;
+     virtual std::pair<ControlStatus, std::string>                 get_parameter_value_as_string(int processor_id, int parameter_id) const = 0;
++    virtual ControlStatus                                         set_parameter_values(const std::vector<ParameterValue>& param_values) = 0;
+     virtual ControlStatus                                         set_parameter_value(int processor_id, int parameter_id, float value) = 0;
+ 
+     virtual std::pair<ControlStatus, std::vector<PropertyInfo>>   get_processor_properties(int processor_id) const = 0;
+diff --git a/rpc_interface/jsonrpc_wrapper/jsonrpc_wrapper b/rpc_interface/jsonrpc_wrapper/jsonrpc_wrapper
+index ac90dde..5b1cd7b 100755
+--- a/rpc_interface/jsonrpc_wrapper/jsonrpc_wrapper
++++ b/rpc_interface/jsonrpc_wrapper/jsonrpc_wrapper
+@@ -512,6 +512,14 @@ async def GetParameterInfo(context, processor_id, parameter_id):
+     except grpc.RpcError as e:
+         return grpc_error_format(e)
+ 
++@methods.add
++async def GetParameterValues(context, processor_id):
++    try:
++        response = context.stub.GetParameterValues(sushi_rpc_pb2.ProcessorIdentifier(id = processor_id))
++        return [format_parametervalue(p) for p in response.parameters]
++
++    except grpc.RpcError as e:
++        return grpc_error_format(e)
+ 
+ @methods.add
+ async def GetParameterValue(context, processor_id, parameter_id):
+@@ -556,6 +564,14 @@ async def GetStringPropertyValue(context, processor_id, property_id):
+     except grpc.RpcError as e:
+         return grpc_error_format(e)
+ 
++@methods.add
++async def SetParameterValues(context, param_values):
++    try:
++        response = context.stub.SetParameterValues(param_values = param_values)
++        return None
++
++    except grpc.RpcError as e:
++        return grpc_error_format(e)
+ 
+ @methods.add
+ async def SetParameterValue(context, processor_id, parameter_id, value):
+@@ -623,6 +639,11 @@ def format_parameterinfo(parameter):
+             "min_range" : parameter.min_range,
+             "max_range" : parameter.max_range }
+ 
++def format_parametervalue(parameter):
++    return {"processor_id" : parameter.processor_id,
++            "parameter_id" : parameter.parameter_id,
++            "value" : parameter.value }
++
+ def format_cputimings(timing):
+     return {"average" : timing.average,
+             "min" : timing.min,
+diff --git a/rpc_interface/protos/sushi_rpc.proto b/rpc_interface/protos/sushi_rpc.proto
+index fcfeb9b..ab0cb0e 100644
+--- a/rpc_interface/protos/sushi_rpc.proto
++++ b/rpc_interface/protos/sushi_rpc.proto
+@@ -92,9 +92,11 @@ service ParameterController
+     rpc GetProcessorParameters (ProcessorIdentifier) returns (ParameterInfoList) {}
+     rpc GetParameterId (ParameterIdRequest) returns (ParameterIdentifier) {}
+     rpc GetParameterInfo (ParameterIdentifier) returns (ParameterInfo) {}
++    rpc GetParameterValues (ProcessorIdentifier) returns (ParameterValueList) {}
+     rpc GetParameterValue (ParameterIdentifier) returns (GenericFloatValue) {}
+     rpc GetParameterValueInDomain (ParameterIdentifier) returns (GenericFloatValue) {}
+     rpc GetParameterValueAsString (ParameterIdentifier) returns (GenericStringValue) {}
++    rpc SetParameterValues (ParameterValueList) returns (GenericVoidValue) {}
+     rpc SetParameterValue (ParameterValue) returns (GenericVoidValue) {}
+ 
+     rpc GetTrackProperties (TrackIdentifier) returns (PropertyInfoList) {}
+@@ -249,6 +251,8 @@ message TrackIdentifier
+ message ProcessorIdentifier
+ {
+     int32 id = 1;
++    int32 layer_id = 2;
++    int32 state_id = 3;
+ }
+ 
+ message ParameterIdentifier
+@@ -434,6 +438,11 @@ message ParameterIdRequest
+     string ParameterName = 2;
+ }
+ 
++message ParameterValueList
++{
++    repeated ParameterValue parameter_values = 1;
++}
++
+ message ParameterValue
+ {
+     ParameterIdentifier parameter = 1;
+diff --git a/rpc_interface/src/async_service_call_data.cpp b/rpc_interface/src/async_service_call_data.cpp
+index 4c0e1f2..ba40d9d 100644
+--- a/rpc_interface/src/async_service_call_data.cpp
++++ b/rpc_interface/src/async_service_call_data.cpp
+@@ -65,6 +65,8 @@ void SubscribeToUpdatesCallData<ValueType, BlocklistType>::proceed()
+                 return;
+             }
+         }
++        if (!_notifications.empty())
++            _alert();
+         _in_completion_queue = false;
+     }
+     else if (_status == CallStatus::PUSH_TO_BACK)
+@@ -231,9 +233,8 @@ void SubscribeToParameterUpdatesCallData::_unsubscribe()
+ 
+ bool SubscribeToParameterUpdatesCallData::_check_if_blocklisted(const ParameterValue& reply)
+ {
+-    auto key =  _map_key(reply.parameter().parameter_id(),
+-                         reply.parameter().processor_id());
+-
++    auto key =  _map_key(reply.parameter().processor_id(),
++                         reply.parameter().parameter_id());
+     return !(_blocklist.find(key) == _blocklist.end());
+ }
+ 
+diff --git a/rpc_interface/src/control_service.cpp b/rpc_interface/src/control_service.cpp
+index 34ebd8d..5628a78 100644
+--- a/rpc_interface/src/control_service.cpp
++++ b/rpc_interface/src/control_service.cpp
+@@ -205,6 +205,13 @@ inline void to_grpc(sushi_rpc::ProcessorInfo& dest, const sushi::ext::ProcessorI
+     dest.set_program_count(src.program_count);
+ }
+ 
++inline void to_grpc(sushi_rpc::ParameterValue& dest, const sushi::ext::ParameterValue& src)
++{
++    dest.mutable_parameter()->set_processor_id(src.processor_id);
++    dest.mutable_parameter()->set_parameter_id(src.parameter_id);
++    dest.set_value(src.value);
++}
++
+ inline void to_grpc(sushi_rpc::MidiKbdConnection& dest, const sushi::ext::MidiKbdConnection& src)
+ {
+     dest.mutable_track()->set_id(src.track_id);
+@@ -743,6 +750,40 @@ grpc::Status ParameterControlService::GetParameterInfo(grpc::ServerContext* /*co
+     return grpc::Status::OK;
+ }
+ 
++grpc::Status ParameterControlService::GetParameterValues(grpc::ServerContext* /*context*/,
++                                                         const sushi_rpc::ProcessorIdentifier* request,
++                                                         sushi_rpc::ParameterValueList* response)
++{
++    std::pair<sushi::ext::ControlStatus, std::vector<sushi::ext::ParameterInfo>> param_info;
++    if ((request->layer_id() != -1) && (request->state_id() != -1)) {
++        param_info = _controller->get_processor_parameters(request->id(), request->layer_id(), request->state_id());
++    }
++    else if (request->layer_id() != -1) {
++        param_info = _controller->get_processor_parameters(request->id(), request->layer_id());
++    }
++    else {
++        param_info = _controller->get_processor_parameters(request->id());
++    }
++    if (param_info.first == sushi::ext::ControlStatus::OK)
++    {
++        for (const auto& parameter : param_info.second)
++        {
++            auto [status, value] = _controller->get_parameter_value(request->id(), parameter.id);
++            if (status != sushi::ext::ControlStatus::OK)
++            {        
++                return to_grpc_status(status);
++            }
++            auto resp_param_value = response->add_parameter_values();
++            auto param_value = sushi::ext::ParameterValue();
++            param_value.processor_id = request->id();
++            param_value.parameter_id = parameter.id;
++            param_value.value = value;
++            to_grpc(*resp_param_value, param_value);
++        }
++    }
++    return to_grpc_status(param_info.first);
++}
++
+ grpc::Status ParameterControlService::GetParameterValue(grpc::ServerContext* /*context*/,
+                                                         const sushi_rpc::ParameterIdentifier* request,
+                                                         sushi_rpc::GenericFloatValue* response)
+@@ -782,6 +823,22 @@ grpc::Status ParameterControlService::GetParameterValueAsString(grpc::ServerCont
+     return grpc::Status::OK;
+ }
+ 
++grpc::Status ParameterControlService::SetParameterValues(grpc::ServerContext* /*context*/,
++                                                         const sushi_rpc::ParameterValueList* request,
++                                                         sushi_rpc::GenericVoidValue* /*response*/)
++{
++    auto status = sushi::ext::ControlStatus::OK;
++    for (const sushi_rpc::ParameterValue& pv : request->parameter_values()) 
++    {
++        status = _controller->set_parameter_value(pv.parameter().processor_id(),
++                                                  pv.parameter().parameter_id(),
++                                                  pv.value());
++        if (status != sushi::ext::ControlStatus::OK)
++            break;
++    }
++    return to_grpc_status(status);
++}
++
+ grpc::Status ParameterControlService::SetParameterValue(grpc::ServerContext* /*context*/,
+                                                         const sushi_rpc::ParameterValue* request,
+                                                         sushi_rpc::GenericVoidValue* /*response*/)
+diff --git a/rpc_interface/src/control_service.h b/rpc_interface/src/control_service.h
+index 8379a10..5a7ea53 100644
+--- a/rpc_interface/src/control_service.h
++++ b/rpc_interface/src/control_service.h
+@@ -140,9 +140,11 @@ public:
+     grpc::Status GetProcessorParameters(grpc::ServerContext* context, const sushi_rpc::ProcessorIdentifier* request, sushi_rpc::ParameterInfoList* response) override;
+     grpc::Status GetParameterId(grpc::ServerContext* context, const sushi_rpc::ParameterIdRequest* request, sushi_rpc::ParameterIdentifier* response) override;
+     grpc::Status GetParameterInfo(grpc::ServerContext* context, const sushi_rpc::ParameterIdentifier* request, sushi_rpc::ParameterInfo* response) override;
++    grpc::Status GetParameterValues(grpc::ServerContext* context, const sushi_rpc::ProcessorIdentifier* request, sushi_rpc::ParameterValueList* response) override;
+     grpc::Status GetParameterValue(grpc::ServerContext* context, const sushi_rpc::ParameterIdentifier* request, sushi_rpc::GenericFloatValue* response) override;
+     grpc::Status GetParameterValueInDomain(grpc::ServerContext* context, const sushi_rpc::ParameterIdentifier* request, sushi_rpc::GenericFloatValue* response) override;
+     grpc::Status GetParameterValueAsString(grpc::ServerContext* context, const sushi_rpc::ParameterIdentifier* request, sushi_rpc::GenericStringValue* response) override;
++    grpc::Status SetParameterValues(grpc::ServerContext* context, const sushi_rpc::ParameterValueList* request, sushi_rpc::GenericVoidValue* response) override;
+     grpc::Status SetParameterValue(grpc::ServerContext* context, const sushi_rpc::ParameterValue* request, sushi_rpc::GenericVoidValue* response) override;
+ 
+     grpc::Status GetTrackProperties(grpc::ServerContext* context, const sushi_rpc::TrackIdentifier* request, sushi_rpc::PropertyInfoList* response) override;
+diff --git a/src/audio_frontends/base_audio_frontend.h b/src/audio_frontends/base_audio_frontend.h
+index 794d7aa..119940c 100644
+--- a/src/audio_frontends/base_audio_frontend.h
++++ b/src/audio_frontends/base_audio_frontend.h
+@@ -26,7 +26,7 @@ namespace sushi {
+ 
+ namespace audio_frontend {
+ 
+-constexpr int MAX_FRONTEND_CHANNELS = 8;
++constexpr int MAX_FRONTEND_CHANNELS = 64;
+ 
+ /**
+  * @brief Error codes returned from init()
+diff --git a/src/audio_frontends/offline_frontend.h b/src/audio_frontends/offline_frontend.h
+index 99ed34b..aff645b 100644
+--- a/src/audio_frontends/offline_frontend.h
++++ b/src/audio_frontends/offline_frontend.h
+@@ -36,7 +36,7 @@ namespace sushi {
+ namespace audio_frontend {
+ 
+ constexpr int OFFLINE_FRONTEND_CHANNELS = 2;
+-constexpr int DUMMY_FRONTEND_CHANNELS = 10;
++constexpr int DUMMY_FRONTEND_CHANNELS = 38;
+ 
+ struct OfflineFrontendConfiguration : public BaseAudioFrontendConfiguration
+ {
+diff --git a/src/engine/controller/parameter_controller.cpp b/src/engine/controller/parameter_controller.cpp
+index de8488e..e065c74 100644
+--- a/src/engine/controller/parameter_controller.cpp
++++ b/src/engine/controller/parameter_controller.cpp
+@@ -63,6 +63,59 @@ inline std::vector<ext::ParameterInfo>  _read_parameters(const Processor* proces
+     return infos;
+ }
+ 
++inline std::vector<ext::ParameterInfo>  _read_parameters(const Processor* processor, int layer_id)
++{
++    assert(processor != nullptr);
++    std::vector<ext::ParameterInfo> infos;
++    auto params = processor->layer_parameters(layer_id);
++    auto num_params = processor->num_layer_parameters();
++    for (uint i=0; i<num_params; i++)
++    {
++        const auto param = *params;
++        if (param->type() == ParameterType::FLOAT || param->type() == ParameterType::INT || param->type() == ParameterType::BOOL)
++        {
++            ext::ParameterInfo info;
++            info.id = param->id();
++            info.type = ext::ParameterType::FLOAT;
++            info.label = param->label();
++            info.name = param->name();
++            info.unit = param->unit();
++            info.automatable = param->automatable();
++            info.min_domain_value = param->min_domain_value();
++            info.max_domain_value = param->max_domain_value();
++            infos.push_back(info);
++        }
++        params++;
++    }
++    return infos;
++}
++inline std::vector<ext::ParameterInfo>  _read_parameters(const Processor* processor, int layer_id, int state_id)
++{
++    assert(processor != nullptr);
++    std::vector<ext::ParameterInfo> infos;
++    auto params = processor->layer_state_parameters(layer_id, state_id);
++    auto num_params = processor->num_layer_state_parameters();    
++    for (uint i=0; i<num_params; i++)
++    {
++        const auto param = *params;
++        if (param->type() == ParameterType::FLOAT || param->type() == ParameterType::INT || param->type() == ParameterType::BOOL)
++        {
++            ext::ParameterInfo info;
++            info.id = param->id();
++            info.type = ext::ParameterType::FLOAT;
++            info.label = param->label();
++            info.name = param->name();
++            info.unit = param->unit();
++            info.automatable = param->automatable();
++            info.min_domain_value = param->min_domain_value();
++            info.max_domain_value = param->max_domain_value();
++            infos.push_back(info);
++        }
++        params++;
++    }
++    return infos;
++}
++
+ inline std::vector<ext::PropertyInfo>  _read_properties(const Processor* processor)
+ {
+     assert(processor != nullptr);
+@@ -82,6 +135,72 @@ inline std::vector<ext::PropertyInfo>  _read_properties(const Processor* process
+     return infos;
+ }
+ 
++inline std::vector<ext::ParameterValue>  _read_parameter_values(const Processor* processor)
++{
++    assert(processor != nullptr);
++    std::vector<ext::ParameterValue> values;
++    const auto& params = processor->all_parameters();
++    for (const auto& param : params)
++    {
++        auto[status, value] = processor->parameter_value(param->id());
++        if (status == ProcessorReturnCode::OK)
++        {
++            ext::ParameterValue param_value;
++            param_value.processor_id = processor->id();
++            param_value.parameter_id = param->id();
++            param_value.value = value;
++            values.push_back(param_value);
++        }
++    }
++    return values;
++}
++
++inline std::vector<ext::ParameterValue>  _read_parameter_values(const Processor* processor, int layer_id)
++{
++    assert(processor != nullptr);
++    std::vector<ext::ParameterValue> values;
++    auto params = processor->layer_parameters(layer_id);
++    auto num_params = processor->num_layer_parameters();
++    for (uint i=0; i<num_params; i++)
++    {
++        const auto param = *params;
++        auto[status, value] = processor->parameter_value(param->id());
++        if (status == ProcessorReturnCode::OK)
++        {
++            ext::ParameterValue param_value;
++            param_value.processor_id = processor->id();
++            param_value.parameter_id = param->id();
++            param_value.value = value;
++            values.push_back(param_value);
++        }
++        params++;
++    }
++    return values;
++}
++
++inline std::vector<ext::ParameterValue>  _read_parameter_values(const Processor* processor, int layer_id, int state_id)
++{
++    assert(processor != nullptr);
++    std::vector<ext::ParameterValue> values;
++    auto params = processor->layer_state_parameters(layer_id, state_id);
++    auto num_params = processor->num_layer_state_parameters();    
++    for (uint i=0; i<num_params; i++)
++    {
++        const auto param = *params;
++        auto[status, value] = processor->parameter_value(param->id());
++        if (status == ProcessorReturnCode::OK)
++        {
++            ext::ParameterValue param_value;
++            param_value.processor_id = processor->id();
++            param_value.parameter_id = param->id();
++            param_value.value = value;
++            values.push_back(param_value);
++        }
++        params++;
++    }
++    return values;
++}
++
+ ParameterController::ParameterController(BaseEngine* engine) : _engine(engine),
+                                                                _event_dispatcher(engine->event_dispatcher()),
+                                                                _processors(engine->processor_container())
+@@ -98,6 +217,28 @@ std::pair<ext::ControlStatus, std::vector<ext::ParameterInfo>> ParameterControll
+     return {ext::ControlStatus::NOT_FOUND, std::vector<ext::ParameterInfo>()};
+ }
+ 
++std::pair<ext::ControlStatus, std::vector<ext::ParameterInfo>> ParameterController::get_processor_parameters(int processor_id, int layer_id) const
++{
++    SUSHI_LOG_DEBUG("get_processor_parameters called with processor {}", processor_id);
++    const auto proc = _processors->processor(processor_id);
++    if (proc)
++    {
++        return {ext::ControlStatus::OK, _read_parameters(proc.get(), layer_id)};
++    }
++    return {ext::ControlStatus::NOT_FOUND, std::vector<ext::ParameterInfo>()};
++}
++
++std::pair<ext::ControlStatus, std::vector<ext::ParameterInfo>> ParameterController::get_processor_parameters(int processor_id, int layer_id, int state_id) const
++{
++    SUSHI_LOG_DEBUG("get_processor_parameters called with processor {}", processor_id);
++    const auto proc = _processors->processor(processor_id);
++    if (proc)
++    {
++        return {ext::ControlStatus::OK, _read_parameters(proc.get(), layer_id, state_id)};
++    }
++    return {ext::ControlStatus::NOT_FOUND, std::vector<ext::ParameterInfo>()};
++}
++
+ std::pair<ext::ControlStatus, std::vector<ext::ParameterInfo>> ParameterController::get_track_parameters(int track_id) const
+ {
+     SUSHI_LOG_DEBUG("get_track_parameters called with processor {}", track_id);
+@@ -151,6 +292,39 @@ std::pair<ext::ControlStatus, ext::ParameterInfo> ParameterController::get_param
+     return {ext::ControlStatus::NOT_FOUND, info};
+ }
+ 
++std::pair<ext::ControlStatus, std::vector<ext::ParameterValue>> ParameterController::get_parameter_values(int processor_id) const
++{
++    SUSHI_LOG_DEBUG("get_parameter_values called with processor {}", processor_id);
++    const auto proc = _processors->processor(processor_id);
++    if (proc)
++    {
++        return {ext::ControlStatus::OK, _read_parameter_values(proc.get())};
++    }
++    return {ext::ControlStatus::NOT_FOUND, std::vector<ext::ParameterValue>()};
++}
++
++std::pair<ext::ControlStatus, std::vector<ext::ParameterValue>> ParameterController::get_parameter_values(int processor_id, int layer_id) const
++{
++    SUSHI_LOG_DEBUG("get_parameter_values called with processor {}", processor_id);
++    const auto proc = _processors->processor(processor_id);
++    if (proc)
++    {
++        return {ext::ControlStatus::OK, _read_parameter_values(proc.get(), layer_id)};
++    }
++    return {ext::ControlStatus::NOT_FOUND, std::vector<ext::ParameterValue>()};
++}
++
++std::pair<ext::ControlStatus, std::vector<ext::ParameterValue>> ParameterController::get_parameter_values(int processor_id, int layer_id, int state_id) const
++{
++    SUSHI_LOG_DEBUG("get_parameter_values called with processor {}", processor_id);
++    const auto proc = _processors->processor(processor_id);
++    if (proc)
++    {
++        return {ext::ControlStatus::OK, _read_parameter_values(proc.get(), layer_id, state_id)};
++    }
++    return {ext::ControlStatus::NOT_FOUND, std::vector<ext::ParameterValue>()};
++}
++
+ std::pair<ext::ControlStatus, float> ParameterController::get_parameter_value(int processor_id, int parameter_id) const
+ {
+     SUSHI_LOG_DEBUG("get_parameter_value called with processor {} and parameter {}", processor_id, parameter_id);
+@@ -211,6 +385,16 @@ std::pair<ext::ControlStatus, std::string> ParameterController::get_property_val
+     return {ext::ControlStatus::NOT_FOUND, 0};
+ }
+ 
++ext::ControlStatus ParameterController::set_parameter_values(const std::vector<ext::ParameterValue>& param_values)
++{
++    SUSHI_LOG_DEBUG("set_parameter_values called");
++    for (const ext::ParameterValue& pv : param_values)
++    {
++        set_parameter_value(pv.processor_id, pv.parameter_id, pv.value);
++    }
++    return ext::ControlStatus::OK;
++}
++
+ ext::ControlStatus ParameterController::set_parameter_value(int processor_id, int parameter_id, float value)
+ {
+     float clamped_value = std::clamp<float>(value, 0.0f, 1.0f);
+diff --git a/src/engine/controller/parameter_controller.h b/src/engine/controller/parameter_controller.h
+index 1d5840d..d4af261 100644
+--- a/src/engine/controller/parameter_controller.h
++++ b/src/engine/controller/parameter_controller.h
+@@ -36,6 +36,8 @@ public:
+     ParameterController(BaseEngine* engine);
+ 
+     std::pair<ext::ControlStatus, std::vector<ext::ParameterInfo>> get_processor_parameters(int processor_id) const override;
++    std::pair<ext::ControlStatus, std::vector<ext::ParameterInfo>> get_processor_parameters(int processor_id, int layer_id) const override;
++    std::pair<ext::ControlStatus, std::vector<ext::ParameterInfo>> get_processor_parameters(int processor_id, int layer_id, int state_id) const override;
+ 
+     std::pair<ext::ControlStatus, std::vector<ext::ParameterInfo>> get_track_parameters(int track_id) const override;
+ 
+@@ -43,12 +45,18 @@ public:
+ 
+     std::pair<ext::ControlStatus, ext::ParameterInfo> get_parameter_info(int processor_id, int parameter_id) const override;
+ 
++    std::pair<ext::ControlStatus, std::vector<ext::ParameterValue>> get_parameter_values(int processor_id) const override;
++    std::pair<ext::ControlStatus, std::vector<ext::ParameterValue>> get_parameter_values(int processor_id, int layer_id) const override;
++    std::pair<ext::ControlStatus, std::vector<ext::ParameterValue>> get_parameter_values(int processor_id, int layer_id, int state_id) const override;
++
+     std::pair<ext::ControlStatus, float> get_parameter_value(int processor_id, int parameter_id) const override;
+ 
+     std::pair<ext::ControlStatus, float> get_parameter_value_in_domain(int processor_id, int parameter_id) const override;
+ 
+     std::pair<ext::ControlStatus, std::string> get_parameter_value_as_string(int processor_id, int parameter_id) const override;
+ 
++    ext::ControlStatus set_parameter_values(const std::vector<ext::ParameterValue>& param_values) override;
++
+     ext::ControlStatus set_parameter_value(int processor_id, int parameter_id, float value) override;
+ 
+     std::pair<ext::ControlStatus, std::vector<ext::PropertyInfo>>  get_processor_properties(int processor_id) const override;
+diff --git a/src/engine/track.h b/src/engine/track.h
+index f3bc4d3..9c03ad6 100644
+--- a/src/engine/track.h
++++ b/src/engine/track.h
+@@ -38,7 +38,7 @@ namespace sushi {
+ namespace engine {
+ 
+ /* No real technical limit, just something arbitrarily high enough */
+-constexpr int TRACK_MAX_CHANNELS = 10;
++constexpr int TRACK_MAX_CHANNELS = 36;
+ constexpr int TRACK_MAX_BUSSES = TRACK_MAX_CHANNELS / 2;
+ 
+ class Track : public InternalPlugin, public RtEventPipe
+diff --git a/src/library/processor.h b/src/library/processor.h
+index c362d35..ce9bb90 100644
+--- a/src/library/processor.h
++++ b/src/library/processor.h
+@@ -166,6 +166,42 @@ public:
+         return _parameters_by_index;
+     }
+ 
++    /**
++     * @brief Get all controllable parameters and properties of this processor
++     * @return A list of parameter objects
++     */
++    ParameterDescriptor *const* layer_parameters(int layer_id) const
++    {
++        return _parameters_by_index.data() + (_num_layer_params * layer_id) + _first_layer_param_id;
++    }
++
++    /**
++     * @brief Get all controllable parameters and properties of this processor
++     * @return A list of parameter objects
++     */
++    uint num_layer_parameters() const
++    {
++        return _num_layer_params;
++    }
++
++    /**
++     * @brief Get all controllable parameters and properties of this processor
++     * @return A list of parameter objects
++     */
++    ParameterDescriptor *const* layer_state_parameters(int layer_id, int state_id) const
++    {
++        return _parameters_by_index.data() + (_num_layer_params * layer_id) + _first_layer_state_param_id + (_num_layer_state_params * state_id);
++    }
++
++    /**
++     * @brief Get all controllable parameters and properties of this processor
++     * @return A list of parameter objects
++     */
++    uint num_layer_state_parameters() const
++    {
++        return _num_layer_state_params;
++    }
++
+     int max_input_channels() const {return _max_input_channels;}
+     int max_output_channels() const {return _max_output_channels;}
+     int input_channels() const {return  _current_input_channels;}
+@@ -453,6 +489,11 @@ protected:
+ 
+     HostControl _host_control;
+ 
++    ObjectId _first_layer_param_id = 0;
++    ObjectId _first_layer_state_param_id = 0;
++    uint _num_layer_params = 0;
++    uint _num_layer_state_params = 0;    
++
+ private:
+     RtEventPipe* _output_pipe{nullptr};
+     /* Automatically generated unique id for identifying this processor */
+diff --git a/src/library/vst3x/vst3x_host_app.cpp b/src/library/vst3x/vst3x_host_app.cpp
+index 4eb30e1..195f48c 100644
+--- a/src/library/vst3x/vst3x_host_app.cpp
++++ b/src/library/vst3x/vst3x_host_app.cpp
+@@ -152,6 +152,7 @@ PluginInstance::PluginInstance(SushiHostApplication* host_app): _host_app(host_a
+ 
+ PluginInstance::~PluginInstance()
+ {
++    printf("\nvst host exit\n");
+     if (_component_connection)
+     {
+         _component_connection->disconnect();
+@@ -160,6 +161,12 @@ PluginInstance::~PluginInstance()
+     {
+         _controller_connection->disconnect();
+     }
++
++    // Clean up the plugin instance
++    _processor->release();
++    _component->release();
++    _processor = nullptr;
++    _component = nullptr;
+ }
+ 
+ bool PluginInstance::load_plugin(const std::string& plugin_path, const std::string& plugin_name)
+diff --git a/src/library/vst3x/vst3x_utils.h b/src/library/vst3x/vst3x_utils.h
+index b6e9c82..6638e44 100644
+--- a/src/library/vst3x/vst3x_utils.h
++++ b/src/library/vst3x/vst3x_utils.h
+@@ -36,7 +36,7 @@
+ namespace sushi {
+ namespace vst3 {
+ 
+-constexpr int VST_WRAPPER_MAX_N_CHANNELS = 8;
++constexpr int VST_WRAPPER_MAX_N_CHANNELS = 36;
+ 
+ /**
+  * @brief Wrapping the processdata in our own class for convenience
+@@ -86,6 +86,11 @@ public:
+         _in_events->clear();
+         _out_events->clear();
+         _in_parameters->clearQueue();
++        //_out_parameters->clearQueue();
++    }
++
++    void clear_out_params()
++    {
+         _out_parameters->clearQueue();
+     }
+ 
+diff --git a/src/library/vst3x/vst3x_wrapper.cpp b/src/library/vst3x/vst3x_wrapper.cpp
+index ca3ed75..f6dc407 100644
+--- a/src/library/vst3x/vst3x_wrapper.cpp
++++ b/src/library/vst3x/vst3x_wrapper.cpp
+@@ -300,6 +300,8 @@ void Vst3xWrapper::process_audio(const ChunkSampleBuffer &in_buffer, ChunkSample
+ {
+     if (_process_data.inputParameterChanges->getParameterCount() > 0)
+     {
++        //printf("\nSTARTING!\n");
++        _instance.controller()->setBusyUpdatingParams(true); 
+         request_non_rt_task(parameter_update_callback);
+     }
+     if(_bypass_parameter.supported == false && _bypass_manager.should_process() == false)
+@@ -535,6 +537,10 @@ ProcessorReturnCode Vst3xWrapper::set_program(int program)
+ bool Vst3xWrapper::_register_parameters()
+ {
+     int param_count = _instance.controller()->getParameterCount();
++    _first_layer_param_id = _instance.controller()->firstLayerParamId();
++    _first_layer_state_param_id = _instance.controller()->firstLayerStateParamId();    
++    _num_layer_params = _instance.controller()->getNumLayerParams();
++    _num_layer_state_params = _instance.controller()->getNumLayerStateParams();
+     _in_parameter_changes.setMaxParameters(param_count);
+     _out_parameter_changes.setMaxParameters(param_count);
+ 
+@@ -629,16 +635,19 @@ bool Vst3xWrapper::_setup_audio_busses()
+     }
+     _max_input_channels = 0;
+     _max_output_channels = 0;
++    _current_input_channels = 0;
+     /* Setup 1 main output bus and 1 main input bus (if available) */
+     Steinberg::Vst::BusInfo info;
+-    for (int i = 0; i < input_audio_busses; ++i)
++    _num_output_busses = output_audio_busses;
++    _num_input_busses = input_audio_busses;    
++    for (int i = 0; i <= input_audio_busses; ++i)
+     {
+         auto res = _instance.component()->getBusInfo(Steinberg::Vst::MediaTypes::kAudio,
+                                                      Steinberg::Vst::BusDirections::kInput, i, info);
+-        if (res == Steinberg::kResultOk && info.busType == Steinberg::Vst::BusTypes::kMain) // Then use this one
++        if (res == Steinberg::kResultOk) // Then use this one
+         {
+             _max_input_channels = info.channelCount;
+-            _current_input_channels = _max_input_channels;
++            _current_input_channels += _max_input_channels;
+             res = _instance.component()->activateBus(Steinberg::Vst::MediaTypes::kAudio,
+                                                      Steinberg::Vst::BusDirections::kInput, i, Steinberg::TBool(true));
+             if (res != Steinberg::kResultOk)
+@@ -646,7 +655,6 @@ bool Vst3xWrapper::_setup_audio_busses()
+                 SUSHI_LOG_ERROR("Failed to activate plugin input bus {}", i);
+                 return false;
+             }
+-            break;
+         }
+     }
+     for (int i = 0; i < output_audio_busses; ++i)
+@@ -656,7 +664,7 @@ bool Vst3xWrapper::_setup_audio_busses()
+         if (res == Steinberg::kResultOk && info.busType == Steinberg::Vst::BusTypes::kMain) // Then use this one
+         {
+             _max_output_channels = info.channelCount;
+-            _current_output_channels = _max_output_channels;
++            _current_output_channels += _max_output_channels;
+             res = _instance.component()->activateBus(Steinberg::Vst::MediaTypes::kAudio,
+                                                      Steinberg::Vst::BusDirections::kOutput, i, Steinberg::TBool(true));
+             if (res != Steinberg::kResultOk)
+@@ -664,10 +672,11 @@ bool Vst3xWrapper::_setup_audio_busses()
+                 SUSHI_LOG_ERROR("Failed to activate plugin output bus {}", i);
+                 return false;
+             }
+-            break;
+         }
+     }
+-    SUSHI_LOG_INFO("Vst3 wrapper ({}) has {} inputs and {} outputs", this->name(), _max_input_channels, _max_output_channels);
++    _max_output_channels = _current_output_channels;
++    _max_input_channels = _current_input_channels;
++    SUSHI_LOG_INFO("Vst3 wrappera ({}) has {} inputs and {} outputs", this->name(), _current_input_channels, _current_output_channels);
+     return true;
+ }
+ 
+@@ -702,12 +711,14 @@ bool Vst3xWrapper::_setup_event_busses()
+ 
+ bool Vst3xWrapper::_setup_channels()
+ {
+-    SUSHI_LOG_INFO("Vst3 wrapper ({}) setting up {} inputs and {} outputs", this->name(), _current_input_channels, _current_output_channels);
+-    Steinberg::Vst::SpeakerArrangement input_arr = speaker_arr_from_channels(_current_input_channels);
+-    Steinberg::Vst::SpeakerArrangement output_arr = speaker_arr_from_channels(_current_output_channels);
++    SUSHI_LOG_INFO("Vst3 wrapperb ({}) setting up {} inputs and {} outputs", this->name(), _current_input_channels, _current_output_channels);
++    Steinberg::Vst::SpeakerArrangement input_arr[_num_input_busses];
++    speaker_arr_from_channels(_current_input_channels, input_arr);
++    Steinberg::Vst::SpeakerArrangement output_arr[_num_output_busses];      
++    speaker_arr_from_channels(_current_output_channels, output_arr);
+ 
+     /* numIns and numOuts refer to the number of busses, not channels, the docs are very vague on this point */
+-    auto res = _instance.processor()->setBusArrangements(&input_arr, (_max_input_channels == 0)? 0:1, &output_arr, 1);
++    auto res = _instance.processor()->setBusArrangements(input_arr, _num_input_busses, output_arr, _num_output_busses);
+     if (res != Steinberg::kResultOk)
+     {
+         SUSHI_LOG_ERROR("Failed to set a valid channel arrangement");
+@@ -829,27 +840,42 @@ void Vst3xWrapper::_forward_events(Steinberg::Vst::ProcessData& data)
+ 
+ void Vst3xWrapper::_forward_params(Steinberg::Vst::ProcessData& data)
+ {
+-    int param_count = data.outputParameterChanges->getParameterCount();
+-    for (int i = 0; i < param_count; ++i)
+-    {
+-        auto queue = data.outputParameterChanges->getParameterData(i);
+-        auto id = queue->getParameterId();
+-        int points = queue->getPointCount();
+-        if (points > 0)
++    if (!_instance.controller()->busyUpdatingParams()) {
++        int param_count = data.outputParameterChanges->getParameterCount();
++        //if (param_count > 0) {
++        //    printf("\n_forward_params: %d\n", param_count);
++        //}
++        for (int i = 0; i < param_count; ++i)
+         {
+-            double value;
+-            int offset;
+-            auto res = queue->getPoint(points - 1, offset, value);
+-            if (res == Steinberg::kResultOk)
++            auto queue = static_cast<Steinberg::Vst::ParameterValueQueue *>(data.outputParameterChanges->getParameterData(i));
++            auto id = queue->getParameterId();
++            int points = queue->getPointCount();
++            if (points > 0)
+             {
+-                if (maybe_output_cv_value(id, value) == false)
++                double value;
++                int offset;
++                auto res = queue->getPoint(points - 1, offset, value);
++                if (res == Steinberg::kResultOk)
+                 {
+-                    auto e = RtEvent::make_parameter_change_event(this->id(), 0, id, static_cast<float>(value));
+-                    output_event(e);
++                    if (maybe_output_cv_value(id, value) == false)
++                    {
++                        // Export this param change?
++                        if (queue->getExportChange()) {
++                            auto e = RtEvent::make_parameter_change_event(this->id(), 0, id, static_cast<float>(value));
++                            output_event(e);
++                        }
++
++                        // Always update the edit controller
++                        _instance.controller()->setParamNormalized(id, static_cast<float>(value));                    
++                    }
+                 }
+             }
+         }
++        _process_data.clear_out_params();
+     }
++    //else {
++    //    printf("\nBUSY AS BRO!\n");
++    //}
+ }
+ 
+ void Vst3xWrapper::_fill_processing_context()
+@@ -940,31 +966,101 @@ int Vst3xWrapper::_parameter_update_callback(EventId /*id*/)
+     {
+         res |= _instance.controller()->setParamNormalized(update.id, update.value);
+     }
++    _instance.controller()->setBusyUpdatingParams(false); 
++    //printf("\nDONE!\n");
+     return res == Steinberg::kResultOk? EventStatus::HANDLED_OK : EventStatus::ERROR;
+ }
+ 
+-Steinberg::Vst::SpeakerArrangement speaker_arr_from_channels(int channels)
++void speaker_arr_from_channels(int channels, Steinberg::Vst::SpeakerArrangement* bus)
+ {
+     switch (channels)
+     {
+         case 0:
+-            return Steinberg::Vst::SpeakerArr::kEmpty;
++            bus[0]= Steinberg::Vst::SpeakerArr::kEmpty;
++            break;
+         case 1:
+-            return Steinberg::Vst::SpeakerArr::kMono;
++            bus[0] =Steinberg::Vst::SpeakerArr::kMono;
++            break;
+         case 2:
+-            return Steinberg::Vst::SpeakerArr::kStereo;
++            bus[0] =Steinberg::Vst::SpeakerArr::kMono;
++            bus[1] =Steinberg::Vst::SpeakerArr::kMono;
++            break;
+         case 3:
+-            return Steinberg::Vst::SpeakerArr::k30Music;
++            bus[0] =Steinberg::Vst::SpeakerArr::k30Music;
++            break;
+         case 4:
+-            return Steinberg::Vst::SpeakerArr::k40Music;
++            bus[0] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[1] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[2] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[3] = Steinberg::Vst::SpeakerArr::kMono;
++            break;
+         case 5:
+-            return Steinberg::Vst::SpeakerArr::k50;
++            bus[0] =Steinberg::Vst::SpeakerArr::k50;
++            break;
+         case 6:
+-            return Steinberg::Vst::SpeakerArr::k60Music;
++            bus[0] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[1] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[2] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[3] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[4] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[5] = Steinberg::Vst::SpeakerArr::kMono;
++            break;
+         case 7:
+-            return Steinberg::Vst::SpeakerArr::k70Music;
++            bus[0] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[1] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[2] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[3] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[4] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[5] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[6] = Steinberg::Vst::SpeakerArr::kMono;
++            break;
++        case 14:
++            bus[0] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[1] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[2] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[3] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[4] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[5] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[6] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[7] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[8] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[9] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[10] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[11] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[12] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[13] = Steinberg::Vst::SpeakerArr::kMono;
++            break;            
++        case 36:
++            bus[0] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[1] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[2] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[3] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[4] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[5] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[6] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[7] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[8] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[9] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[10] = Steinberg::Vst::SpeakerArr::kMono;
++            bus[11] = Steinberg::Vst::SpeakerArr::kMono;
++
++            bus[12] = Steinberg::Vst::SpeakerArr::kStereo;
++            bus[13] = Steinberg::Vst::SpeakerArr::kStereo;
++            bus[14] = Steinberg::Vst::SpeakerArr::kStereo;
++            bus[15] = Steinberg::Vst::SpeakerArr::kStereo;
++            bus[16] = Steinberg::Vst::SpeakerArr::kStereo;
++            bus[17] = Steinberg::Vst::SpeakerArr::kStereo;
++            bus[18] = Steinberg::Vst::SpeakerArr::kStereo;
++            bus[19] = Steinberg::Vst::SpeakerArr::kStereo;
++            bus[20] = Steinberg::Vst::SpeakerArr::kStereo;
++            bus[21] = Steinberg::Vst::SpeakerArr::kStereo;
++            bus[22] = Steinberg::Vst::SpeakerArr::kStereo;
++            bus[23] = Steinberg::Vst::SpeakerArr::kStereo;
++            break;
++
+         default:
+-            return Steinberg::Vst::SpeakerArr::k80Music;
++            bus[0] =Steinberg::Vst::SpeakerArr::k80Music;
++            break;
+     }
+ }
+ } // end namespace vst3
+diff --git a/src/library/vst3x/vst3x_wrapper.h b/src/library/vst3x/vst3x_wrapper.h
+index cc9506e..0534bc1 100644
+--- a/src/library/vst3x/vst3x_wrapper.h
++++ b/src/library/vst3x/vst3x_wrapper.h
+@@ -189,6 +189,8 @@ private:
+     int _main_program_list_id;
+     int _program_count{0};
+     int _current_program{0};
++    int _num_output_busses;
++    int _num_input_busses;
+ 
+     BypassManager _bypass_manager{_bypassed};
+ 
+@@ -215,12 +217,12 @@ private:
+     SpecialParameter _mod_wheel_parameter;
+     SpecialParameter _aftertouch_parameter;
+ 
+-    memory_relaxed_aquire_release::CircularFifo<ParameterUpdate, 100> _parameter_update_queue;
++    memory_relaxed_aquire_release::CircularFifo<ParameterUpdate, 8192> _parameter_update_queue;
+     std::map<Steinberg::Vst::ParamID, const ParameterDescriptor*> _parameters_by_vst3_id;
+     friend class ComponentHandler;
+ };
+ 
+-Steinberg::Vst::SpeakerArrangement speaker_arr_from_channels(int channels);
++void speaker_arr_from_channels(int channels,Steinberg::Vst::SpeakerArrangement *array );
+ 
+ } // end namespace vst3
+ } // end namespace sushi
+diff --git a/src/main.cpp b/src/main.cpp
+index b0d1820..f04eaf7 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -55,8 +55,21 @@ std::condition_variable exit_notifier;
+ 
+ void signal_handler([[maybe_unused]] int sig)
+ {
+-    exit_flag = true;
+-    exit_notifier.notify_one();
++	printf("\nSushi SIGNAL received: %d\n", sig);
++
++    if (sig == SIGINT) 
++    {
++        // Most likely a CTRL-C to stop Sushi
++        printf("Stopping Sushi...\n\n");
++        exit_flag = true;
++        exit_notifier.notify_one();
++    }
++    else
++    {
++        // Some other signal - kill sushi
++        printf("Sushi killed\n\n");
++        exit(0);
++    }
+ }
+ 
+ void print_sushi_headline()
+@@ -103,6 +116,7 @@ int main(int argc, char* argv[])
+ 
+     signal(SIGINT, signal_handler);
+     signal(SIGTERM, signal_handler);
++    signal(SIGSEGV, signal_handler);
+ 
+     ////////////////////////////////////////////////////////////////////////////////
+     // Command Line arguments parsing
+diff --git a/src/options.h b/src/options.h
+index 942699f..f39ef09 100644
+--- a/src/options.h
++++ b/src/options.h
+@@ -30,7 +30,7 @@
+ #define SUSHI_LOG_LEVEL_DEFAULT "info"
+ #define SUSHI_LOG_FILENAME_DEFAULT "/tmp/sushi.log"
+ #define SUSHI_JSON_FILENAME_DEFAULT "config.json"
+-#define SUSHI_SAMPLE_RATE_DEFAULT 48000
++#define SUSHI_SAMPLE_RATE_DEFAULT 96000
+ #define SUSHI_JACK_CLIENT_NAME_DEFAULT "sushi"
+ #define SUSHI_OSC_SERVER_PORT 24024
+ #define SUSHI_OSC_SEND_PORT 24023
+diff --git a/third-party/fifo/include/fifo/circularfifo_memory_relaxed_aquire_release.h b/third-party/fifo/include/fifo/circularfifo_memory_relaxed_aquire_release.h
+index 818e4bc..29c110a 100644
+--- a/third-party/fifo/include/fifo/circularfifo_memory_relaxed_aquire_release.h
++++ b/third-party/fifo/include/fifo/circularfifo_memory_relaxed_aquire_release.h
+@@ -24,6 +24,7 @@
+ #include <atomic>
+ #include <cstddef>
+ #include <array>
++#include <cstdio>
+ 
+ namespace memory_relaxed_aquire_release {
+ template<typename Element, size_t Size> 
+@@ -67,7 +68,8 @@ bool CircularFifo<Element, Size>::push(const Element& item)
+     _tail.store(next_tail, std::memory_order_release); 
+     return true;
+   }
+-  
++
++  //::printf("\nCircularFifo: FULL\n");
+   return false; // full queue
+ 
+ }
+Submodule third-party/vst3sdk contains modified content
+Submodule pluginterfaces contains modified content
+diff --git a/third-party/vst3sdk/pluginterfaces/vst/ivsteditcontroller.h b/third-party/vst3sdk/pluginterfaces/vst/ivsteditcontroller.h
+index d7c8925..455a3fc 100644
+--- a/third-party/vst3sdk/pluginterfaces/vst/ivsteditcontroller.h
++++ b/third-party/vst3sdk/pluginterfaces/vst/ivsteditcontroller.h
+@@ -411,6 +411,10 @@ public:
+ 	// parameters -------------------------
+ 	/** Returns the number of parameters exported. */
+ 	virtual int32 PLUGIN_API getParameterCount () = 0;
++    virtual ParamID PLUGIN_API firstLayerParamId() = 0;
++    virtual ParamID PLUGIN_API firstLayerStateParamId() = 0;		
++	virtual int32 PLUGIN_API getNumLayerParams () = 0;
++	virtual int32 PLUGIN_API getNumLayerStateParams () = 0;
+ 	/** Gets for a given index the parameter information. */
+ 	virtual tresult PLUGIN_API getParameterInfo (int32 paramIndex, ParameterInfo& info /*out*/) = 0;
+ 
+@@ -432,6 +436,9 @@ public:
+ 		GUI element(s) only!*/
+ 	virtual tresult PLUGIN_API setParamNormalized (ParamID id, ParamValue value) = 0;
+ 
++	virtual bool PLUGIN_API busyUpdatingParams() = 0;
++	virtual void PLUGIN_API setBusyUpdatingParams(bool busy) = 0;
++
+ 	// handler ----------------------------
+ 	/** Gets from host a handler which allows the Plugin-in to communicate with the host.
+ 		Note: This is mandatory if the host is using the IEditController! */
+Submodule public.sdk contains modified content
+diff --git a/third-party/vst3sdk/public.sdk/source/vst/hosting/parameterchanges.h b/third-party/vst3sdk/public.sdk/source/vst/hosting/parameterchanges.h
+index ed1a1db..faafb0a 100644
+--- a/third-party/vst3sdk/public.sdk/source/vst/hosting/parameterchanges.h
++++ b/third-party/vst3sdk/public.sdk/source/vst/hosting/parameterchanges.h
+@@ -53,12 +53,13 @@ public:
+ 	ParameterValueQueue (ParamID paramID);
+ 	virtual ~ParameterValueQueue ();
+ 
+-	ParamID PLUGIN_API getParameterId () SMTG_OVERRIDE { return paramID; }
++	ParamID PLUGIN_API getParameterId () SMTG_OVERRIDE { return paramID & 0x7fffffff; }
++	bool PLUGIN_API getExportChange() { return (paramID & 0x80000000) ? true : false; }
+ 	int32 PLUGIN_API getPointCount () SMTG_OVERRIDE;
+ 	tresult PLUGIN_API getPoint (int32 index, int32& sampleOffset, ParamValue& value) SMTG_OVERRIDE;
+ 	tresult PLUGIN_API addPoint (int32 sampleOffset, ParamValue value, int32& index) SMTG_OVERRIDE;
+ 
+-	void setParamID (ParamID pID) {paramID = pID;}
++	void setParamID (ParamID pID) {paramID = pID; }
+ 	void clear ();
+ 	//------------------------------------------------------------------------
+ 	DECLARE_FUNKNOWN_METHODS
+diff --git a/third-party/vst3sdk/public.sdk/source/vst/vsteditcontroller.cpp b/third-party/vst3sdk/public.sdk/source/vst/vsteditcontroller.cpp
+index a88483c..adb7cc5 100644
+--- a/third-party/vst3sdk/public.sdk/source/vst/vsteditcontroller.cpp
++++ b/third-party/vst3sdk/public.sdk/source/vst/vsteditcontroller.cpp
+@@ -50,6 +50,7 @@ KnobMode EditController::hostKnobMode = kCircularMode;
+ //------------------------------------------------------------------------
+ EditController::EditController () : componentHandler (nullptr), componentHandler2 (nullptr)
+ {
++	updating_params = false;
+ }
+ 
+ //------------------------------------------------------------------------
+@@ -181,6 +182,18 @@ tresult PLUGIN_API EditController::setParamNormalized (ParamID tag, ParamValue v
+ 	return kResultFalse;
+ }
+ 
++//------------------------------------------------------------------------
++bool PLUGIN_API EditController::busyUpdatingParams ()
++{
++	return updating_params;
++}
++
++//------------------------------------------------------------------------
++void PLUGIN_API EditController::setBusyUpdatingParams (bool busy)
++{
++	updating_params = busy;
++}
++
+ //------------------------------------------------------------------------
+ tresult PLUGIN_API EditController::setComponentHandler (IComponentHandler* newHandler)
+ {
+diff --git a/third-party/vst3sdk/public.sdk/source/vst/vsteditcontroller.h b/third-party/vst3sdk/public.sdk/source/vst/vsteditcontroller.h
+index d672784..cc009d4 100644
+--- a/third-party/vst3sdk/public.sdk/source/vst/vsteditcontroller.h
++++ b/third-party/vst3sdk/public.sdk/source/vst/vsteditcontroller.h
+@@ -76,6 +76,8 @@ public:
+ 	ParamValue PLUGIN_API plainParamToNormalized (ParamID tag, ParamValue plainValue) SMTG_OVERRIDE;
+ 	ParamValue PLUGIN_API getParamNormalized (ParamID tag) SMTG_OVERRIDE;
+ 	tresult PLUGIN_API setParamNormalized (ParamID tag, ParamValue value) SMTG_OVERRIDE;
++	bool PLUGIN_API busyUpdatingParams() SMTG_OVERRIDE;
++	void PLUGIN_API setBusyUpdatingParams(bool busy) SMTG_OVERRIDE;
+ 	tresult PLUGIN_API setComponentHandler (IComponentHandler* handler) SMTG_OVERRIDE;
+ 	IPlugView* PLUGIN_API createView (FIDString /*name*/) SMTG_OVERRIDE {return nullptr;}
+ 
+@@ -129,6 +131,7 @@ protected:
+ 	IComponentHandler2* componentHandler2;
+ 
+ 	ParameterContainer parameters;
++	bool updating_params;
+ 
+ 	static KnobMode hostKnobMode;
+ };

@@ -1,0 +1,9 @@
+#! /bin/bash
+id=$( pidof sushi )
+echo $id
+if [ -n "$id" ]; then
+    echo "kill sushi"
+    kill -9 $id
+else
+echo Done
+fi

@@ -1,0 +1,96 @@
+# For Rpi 4, uncomment the line below. It will override the above definition
+MACHINE = "raspberrypi4-64"
+
+DISTRO = "delia"
+DL_DIR = "${TOPDIR}/../downloads"
+
+PACKAGE_CLASSES ?= "package_ipk"
+
+EXTRA_IMAGE_FEATURES ?= "debug-tweaks"
+USER_CLASSES ?= "buildstats image-mklibs image-prelink"
+PATCHRESOLVE = "noop"
+BB_DISKMON_DIRS ??= "\
+    STOPTASKS,${TMPDIR},1G,100K \
+    STOPTASKS,${DL_DIR},1G,100K \
+    STOPTASKS,${SSTATE_DIR},1G,100K \
+    STOPTASKS,/tmp,100M,100K \
+    ABORT,${TMPDIR},100M,1K \
+    ABORT,${DL_DIR},100M,1K \
+    ABORT,${SSTATE_DIR},100M,1K \
+    ABORT,/tmp,10M,1K"
+do_image_complete[deptask] += "do_populate_lic"
+PACKAGECONFIG_append_pn-qemu-native = " sdl"
+PACKAGECONFIG_append_pn-nativesdk-qemu = " sdl"
+CONF_VERSION = "1"
+
+SECURITY_STRINGFORMAT = "-Wformat -Wformat-security"
+
+RPI_KERNEL_DEVICETREE_remove = "broadcom/bcm2711-rpi-400.dtb"
+RPI_KERNEL_DEVICETREE_OVERLAYS_remove = "overlays/vc4-kms-dsi-7inch.dtbo"
+
+INHERIT += "rm_work"
+ENABLE_UART = "0"
+RPI_USE_U_BOOT = "1"
+SERIAL_CONSOLES = "ttyAMA0,115200"
+SWU_VERSION = "1.0.6"
+
+VST2SDK_PATH = ""
+LICENSE_FLAGS_WHITELIST += "commercial"
+EXTRA_IMAGE_FEATURES = " debug-tweaks ssh-server-openssh package-management"
+ELK_HAT_NAME = "delia-pi"
+KERNEL_IMAGETYPE_raspberrypi4-64 = "Image.gz"
+# set the host name of device
+hostname_pn-base-files = "delia-pi"
+
+RPI_KERNEL_DEVICETREE_OVERLAYS_append = " \
+    overlays/melbinst-delia.dtbo \
+    overlays/disable-wifi.dtbo \
+    "
+
+# Comment the following for qt image
+BBMASK += "meta-elkpi/recipes-images/images/elkpi-audio-os-image-qt.bb"
+#BBMASK += "meta-elk/recipes-qt/simple-qt/simple-qt_0.1.bb"
+#BBMASK += "meta-elk/recipes-qt/qt/qtbase_git.bbappend"
+#BBMASK += "meta-raspberrypi/recipes-kernel/linux/linux-raspberrypi_5.4.bb"
+# By default, mda-vst2 plugins are not installed in the image and SUSHI will not
+# have VST2 support enabled. If you have access to the VST2 SDK you can enable
+# both by setting the variable VST2SDK_PATH to the path of the vst2 sdk as
+# follows:
+# VST2SDK_PATH = "path/to/the/vst2sdk/in/your/build/machine/"
+# For example : VST2SDK_PATH = "/home/user/vstsdk2.4"
+# To disable VST2 support, just define `VST2SDK_PATH` as an empty string.
+VST2SDK_PATH = ""
+
+# To generate sdk with x11 libs
+#IMAGE_INSTALL_append = " packagegroup-core-x11 \
+# libxcursor libxcursor-dev \
+# libxinerama libxinerama-dev \
+# "
+TOOLCHAIN_TARGET_TASK_append = " gcc-sanitizers"
+#IMAGE_INSTALL_append = " libasan libubsan liblsan libtsan"
+#DISTRO_FEATURES_append = " directfb"
+DISTRO_FEATURES_remove = " x11 wayland vulkan"
+
+PREFERRED_VERSION_raspa = "1.1.0"
+PREFERRED_VERSION_rpi-rtdm-audio-driver = "1.1.0"
+PREFERRED_VERSION_u-boot = "2021.07"
+PREFERRED_VERSION_libubootenv = "0.3.2"
+PREFERRED_VERSION_xenomai-lib = "3.2"
+
+FORTRAN_forcevariable = ",fortran"
+RUNTIMETARGET_append_pn-gcc-runtime = " libquadmath"
+
+IMAGE_OVERHEAD_FACTOR = "1.0"
+#VOLATILE_LOG_DIR = "no"
+
+BB_NUMBER_THREADS="20"
+PARALLEL_MAKE="-j 20"
+
+IMAGE_NAME = "${DISTRO}-firmware-${SWU_VERSION}"
+IMAGE_LINK_NAME ?= "${DISTRO}-firmware-${SWU_VERSION}"
+SDK_NAME = "${IMAGE_BASENAME}-${TCLIBC}-${SDKMACHINE}"
+
+QT_MODULE_BRANCH_PARAM_append = ";nobranch=1"
+
+# Check connectivity using google (example.com used in the meta layer fails)
+CONNECTIVITY_CHECK_URIS = "https://www.google.com/"
